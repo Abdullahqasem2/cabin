@@ -1,0 +1,91 @@
+Below is the system architecture diagram (Mermaid). Copy this file into a Markdown viewer that supports Mermaid or paste the Mermaid block into mermaid.live to render.
+
+```mermaid
+flowchart LR
+
+  %% ===== Client Side =====
+  subgraph CLIENT[Client Apps]
+    C1[Customer App\nReact Native]
+    C2[Staff App\nReact Native]
+    C3[Admin Dashboard\nReact/Next.js (on Vercel)]
+  end
+
+  %% ===== Backend & Infra (Contabo) =====
+  subgraph CONTABO[Contabo VPS]
+    API[Node.js / Express API]
+    DB[(MongoDB)]
+    MQ[MQTT / WebSocket Broker]
+    AUTH[Auth Service\n(JWT / Tokens)]
+  end
+
+  %% ===== Smart Cabin (per bed/capsule) =====
+  subgraph CABIN[Smart Cabin (Per Capsule)]
+    RPI[Raspberry Pi]
+
+    subgraph SENSORS[ Sensors ]
+      CAM[Face Recognition\nCamera (Eyes Open/Close)]
+      GEST[Hand Gesture\nSensor/Camera]
+    end
+
+    subgraph ACT[Actuators]
+      LIGHT[Smart Light\n(On/Off + Dimmer)]
+      AC[AC Controller\n(Temperature Level)]
+      LOCK[Smart Locks\nMain Door / Room / Cabin]
+    end
+  end
+
+  %% ===== External Services =====
+  PGW[Payment Gateway]
+  NOTI[Push Notifications\nFCM / Expo]
+
+  %% ===== Flows =====
+
+  %% Mobile & Admin -> Backend
+  C1 -->|HTTPS / REST + WebSocket| API
+  C2 -->|HTTPS / REST + WebSocket| API
+  C3 -->|HTTPS (Dashboard API)| API
+
+  %% Backend internal
+  API --> AUTH
+  API --> DB
+  API <---> MQ
+
+  %% Payment & Notifications
+  API --> PGW
+  API --> NOTI
+
+  %% Backend <-> Raspberry Pi
+  RPI <-->|MQTT / WebSocket\n(Commands & Events)| MQ
+
+  %% Sensors -> Raspberry Pi
+  CAM --> RPI
+  GEST --> RPI
+
+  %% Raspberry Pi -> Actuators
+  RPI --> LIGHT
+  RPI --> AC
+  RPI --> LOCK
+
+``` 
+
+Legend:
+
+- Arrows indicate direction of primary data/command flow.
+- `HTTPS` arrows: API requests from apps.
+- `MQTT / WebSocket` arrow: bi-directional device messaging for commands and events.
+
+MQTT topic examples (recommended naming convention):
+
+```text
+Commands:  cabins/<cabinId>/commands/<component>
+Events:    cabins/<cabinId>/events/<event>
+
+Examples:
+  cabins/123/commands/light
+  cabins/123/events/eye_state
+```
+
+Notes:
+
+- To render this diagram, paste the Mermaid block into a renderer that supports flowcharts (e.g., GitHub Markdown, mermaid.live, or VS Code Markdown Preview with Mermaid plugin).
+- If you want, I can export this diagram to PNG/SVG and add it to the repo for viewers who don't have Mermaid rendering enabled.

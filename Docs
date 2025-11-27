@@ -1,0 +1,304 @@
+ # Smart Cabin System — Technical Documentation
+
+ Purpose: provide a clear, actionable reference for architecture, components, deployment, and operational procedures for the Smart Cabin project.
+
+ Audience: backend engineers, embedded/hardware engineers, mobile/web developers, DevOps, and ops staff.
+
+ Quick summary:
+ - Core components: Raspberry Pi device per cabin, Contabo-hosted backend (Node.js), MongoDB, MQTT broker, mobile apps (React Native), and admin dashboard (Next.js).
+ - Communication: apps ⇄ backend over HTTPS; backend ⇄ devices over MQTT (recommended); Pi ⇄ peripherals over GPIO/I²C.
+
+ Table of contents
+ 1. High-level architecture
+ 2. Hardware (per cabin)
+ 3. Network & MQTT
+ 4. Backend design
+ 5. Device integration
+ 6. Behavior logic (face & gesture)
+ 7. Customer mobile app
+ 8. Staff mobile app
+ 9. Admin dashboard
+ 10. Payments & notifications
+ 11. Deployment & CI/CD
+ 12. Security & best practices
+ 13. Enable Claude Haiku 4.5 for all clients
+ 14. Suggested implementation order
+ 15. Appendix & next steps
+
+**Architecture Diagram**
+
+Below is a Mermaid diagram representing the architecture. Paste this block into a Mermaid-enabled Markdown renderer (or open `readme` for the same flowchart).
+
+```mermaid
+flowchart LR
+
+  %% ===== Client Side =====
+  subgraph CLIENT[Client Apps]
+    C1[Customer App\nReact Native]
+    C2[Staff App\nReact Native]
+    C3[Admin Dashboard\nReact/Next.js (on Vercel)]
+  end
+
+  %% ===== Backend & Infra (Contabo) =====
+  subgraph CONTABO[Contabo VPS]
+    API[Node.js / Express API]
+    DB[(MongoDB)]
+    MQ[MQTT / WebSocket Broker]
+    AUTH[Auth Service\n(JWT / Tokens)]
+  end
+
+  %% ===== Smart Cabin (per bed/capsule) =====
+  subgraph CABIN[Smart Cabin (Per Capsule)]
+    RPI[Raspberry Pi]
+
+    subgraph SENSORS[ Sensors ]
+      CAM[Face Recognition\nCamera (Eyes Open/Close)]
+      GEST[Hand Gesture\nSensor/Camera]
+    end
+
+    subgraph ACT[Actuators]
+      LIGHT[Smart Light\n(On/Off + Dimmer)]
+      AC[AC Controller\n(Temperature Level)]
+      LOCK[Smart Locks\nMain Door / Room / Cabin]
+    end
+  end
+
+  %% ===== External Services =====
+  PGW[Payment Gateway]
+  NOTI[Push Notifications\nFCM / Expo]
+
+  %% ===== Flows =====
+
+  %% Mobile & Admin -> Backend
+  C1 -->|HTTPS / REST + WebSocket| API
+  C2 -->|HTTPS / REST + WebSocket| API
+  C3 -->|HTTPS (Dashboard API)| API
+
+  %% Backend internal
+  API --> AUTH
+  API --> DB
+  API <---> MQ
+
+  %% Payment & Notifications
+  API --> PGW
+  API --> NOTI
+
+  %% Backend <-> Raspberry Pi
+  RPI <-->|MQTT / WebSocket\n(Commands & Events)| MQ
+
+  %% Sensors -> Raspberry Pi
+  CAM --> RPI
+  GEST --> RPI
+
+  %% Raspberry Pi -> Actuators
+  RPI --> LIGHT
+  RPI --> AC
+  RPI --> LOCK
+
+```
+
+If your renderer does not support Mermaid, open `readme` in the repo where the same diagram is included, or use https://mermaid.live to paste and render the block.
+
+ 1. High-level architecture
+ - Components:
+   - Smart cabin hardware: Raspberry Pi, camera(s), optional gesture sensor, relays for lights/AC, smart locks.
+   - Backend: Node.js (Express/TypeScript) on Contabo, MongoDB, MQTT broker (Mosquitto recommended).
+   - Apps: Customer & Staff (React Native), Admin (Next.js on Vercel).
+   - External: payment gateway, push notifications provider, optional LLM service for advanced features.
+
+ 2. Hardware (Per Cabin)
+ 2.1 Components (recommended minimum)
+ - Raspberry Pi 4 (2–4 GB)
+ - Camera (USB or Pi Camera) for face/eye detection
+ - Gesture sensor (APDS-9960) or second camera for gesture recognition
+ - 2–4 channel relay board (lights, AC, electric strike)
+ - Smart lock (WiFi/Bluetooth) or electric strike
+ - 12V/5V power supply, enclosure, cabling
+
+ 2.2 Base OS & setup
+ - Flash Raspberry Pi OS Lite and enable SSH.
+ - Install required packages:
+   - On Pi (example):
+     ```powershell
+     sudo apt update; sudo apt upgrade -y
+     sudo apt install python3-pip git mosquitto-clients -y
+     pip3 install paho-mqtt opencv-python RPi.GPIO
+     ```
+ - Create a device service (systemd) that starts on boot and connects to MQTT.
+
+ 2.3 Device service responsibilities
+ - Connect to MQTT broker and authenticate.
+ - Subscribe to command topics and control GPIO/relays.
+ - Publish sensor events (eye_state, gesture, status).
+ - Implement safe shutdown/restart and health telemetry.
+
+ 3. Network & MQTT
+ 3.1 Broker options & hardening
+ - Central broker on Contabo (Mosquitto) or local broker with bridge to VPS.
+ - Secure broker with username/password and TLS. Use Let’s Encrypt for certificates.
+
+ 3.2 Topic conventions (recommended)
+ - Commands → `cabins/<cabinId>/commands/<component>`
+ - Events → `cabins/<cabinId>/events/<event>`
+
+ Examples:
+  - `cabins/123/commands/light`
+  - `cabins/123/events/eye_state` { state: "awake" | "sleep", timestamp }
+
+ 4. Backend Design (Node.js / TypeScript)
+ 4.1 Tech stack
+ - Node.js + Express (TypeScript recommended)
+ - MongoDB (Docker or managed)
+ - MQTT client (`mqtt` npm package)
+ - Authentication: JWT
+
+ 4.2 Structure (example)
+ ```
+ backend/
+   src/
+     config/
+     models/
+     services/
+     controllers/
+     routes/
+     middleware/
+     index.ts
+ ```
+
+ 4.3 Key endpoints (high level)
+ - Auth: `POST /api/auth/login`, `POST /api/auth/register`, `GET /api/auth/me`
+ - Bookings: `POST /api/bookings`, `GET /api/bookings/my`
+ - Control: `POST /api/control/light`, `POST /api/control/ac`, `POST /api/control/door/open`
+
+ 4.4 Door access flow
+ - On successful payment: generate `AccessToken` documents for doors (main, room, cabin) with validity window.
+ - Online open: frontend calls `POST /api/control/door/open` → backend validates booking/token → publishes MQTT command.
+
+ 5. Device Integration (Backend ⇄ Pi)
+ - Backend subscribes to `cabins/+/events/#` and updates cabin state, logs events, creates tasks.
+ - Backend publishes commands to `cabins/<id>/commands/#` and device acts accordingly.
+
+ 6. Behavior Logic (Face & Gesture)
+ 6.1 Eye detection
+ - Run detection at 10–15 FPS; publish `sleep`/`awake` events with timestamps.
+ - Backend configurations control thresholds and post-event actions (e.g., dim lights after X minutes).
+
+ 6.2 Gestures
+ - Start with simple gesture mappings (hand up/down → brightness/temp adjustments).
+ - Store gesture events for analytics and tuning.
+
+ 7. Customer Mobile App (React Native)
+ - Expo (recommended) for faster iteration; store JWT in secure storage; register FCM token for push messages.
+ - Main screens: cabins list, booking flow, my bookings, cabin controls, profile.
+
+ 8. Staff Mobile App
+ - Task list, task detail, ability to mark tasks in_progress/done, simple cabin status view.
+
+ 9. Admin Dashboard (Next.js)
+ - Views: occupancy dashboard, cabin management, bookings calendar, user management, manual controls.
+ - Host on Vercel and set `NEXT_PUBLIC_API_URL`.
+
+ 10. Payments & Notifications
+ - Payment flow: create checkout session → webhook updates booking status → generate access tokens.
+ - Notifications: FCM/Expo tokens saved per user; notification service wraps provider.
+
+ 11. Deployment & CI/CD
+ 11.1 Contabo (Docker Compose) minimum
+  - Run `api`, `mongo`, and `mosquitto` as services.
+  - Use Nginx reverse proxy and Let’s Encrypt in front of API.
+
+ 11.2 CI/CD
+ - GitHub Actions → build & test → SSH deploy `docker-compose` updates on VPS.
+
+ 12. Security & Best Practices
+ - HTTPS everywhere; secure MQTT; RBAC (customer/staff/admin); audit door opens; back up DB; rotate secrets.
+
+ 13. Enable Claude Haiku 4.5 for all clients
+ Purpose
+ - Document a safe, repeatable process to enable the `claude-haiku-4.5` model for all clients of the backend (customers, staff, admin), including rollout, verification, and rollback.
+
+ When to use
+ - When you want all text-generation features (chat, summaries, automation) to use Claude Haiku 4.5 by default.
+
+ Prerequisites
+ - Valid API credentials for the LLM provider that exposes `claude-haiku-4.5`.
+ - Team agreement on data policy (PII handling, logging, retention).
+ - Staging environment to test before production.
+
+ High-level approach
+ 1. Add a configuration option in the backend to set the default LLM model.
+ 2. Use a feature-flag or environment variable to enable the model for all clients.
+ 3. Roll out to staging → run automated and manual tests → promote to production with monitoring.
+
+ Implementation details (backend)
+ - Environment variables (examples):
+   - `LLM_PROVIDER_API_KEY` (secret)
+   - `DEFAULT_LLM_MODEL` (set to `claude-haiku-4.5` for rollout)
+   - `LLM_FALLBACK_MODEL` (e.g., `claude-2` or another safe fallback)
+
+ - Code changes (example pattern):
+   - Centralize LLM client creation in `services/llmService.ts`.
+   - Read `DEFAULT_LLM_MODEL` from config and pass as the `model` parameter to the provider client for every request.
+
+ Pseudocode (TypeScript):
+ ```
+ // config/env.ts
+ export const DEFAULT_LLM_MODEL = process.env.DEFAULT_LLM_MODEL || 'claude-default';
+
+ // services/llmService.ts
+ import LLMClient from 'llm-client'; // replace with actual SDK
+ const client = new LLMClient({ apiKey: process.env.LLM_PROVIDER_API_KEY });
+
+ export async function generateText(prompt: string, options = {}){
+   const model = options.model || DEFAULT_LLM_MODEL;
+   try {
+     return await client.generate({ model, prompt, ...options });
+   } catch (err) {
+     // fallback logic
+     if (process.env.LLM_FALLBACK_MODEL) {
+       return await client.generate({ model: process.env.LLM_FALLBACK_MODEL, prompt, ...options });
+     }
+     throw err;
+   }
+ }
+ ```
+
+ Feature flag and rollout
+ - Use an environment toggle first: set `DEFAULT_LLM_MODEL=claude-haiku-4.5` in staging and test.
+ - Add a runtime feature flag (e.g., `feature.llm.haiku45=true`) backed by a simple config service or LaunchDarkly for controlled rollout.
+ - To enable for all clients, flip the feature flag in production after successful staging tests.
+
+ Testing & verification
+ - Functional tests: run chat/summarization flows and compare outputs for regressions.
+ - Load tests: verify latency and error rates remain acceptable.
+ - Cost estimation: simulate expected request volumes to estimate spend.
+ - Safety tests: ensure prompts that include PII are redacted or handled per policy.
+
+ Monitoring & observability
+ - Record model name, request latency, error rate, and token usage in logs/metrics.
+ - Set alerts for spikes in latency, errors, or cost per minute.
+
+ Rollback plan
+ - If issues occur, revert `DEFAULT_LLM_MODEL` to `LLM_FALLBACK_MODEL` or disable the feature-flag.
+ - Notify on-call and open an incident with captured logs.
+
+ Notes & considerations
+ - Logging: avoid storing PII in logs or use a hashing/redaction step before logging.
+ - Caching: cache responses for identical prompts where appropriate to reduce cost.
+ - Rate-limiting: implement per-tenant / per-user rate limits to avoid runaway costs.
+
+ 14. Suggested implementation order
+ - Phase 1: Core booking system (backend, mobile booking flow, admin view).
+ - Phase 2: Staff & tasks.
+ - Phase 3: MQTT & basic device commands (no vision features yet).
+ - Phase 4: Door access and secure tokens.
+ - Phase 5: Vision/gesture features and LLM features (Claude Haiku 4.5 enablement).
+
+ 15. Appendix & next steps
+ - Option A: I can generate TypeScript interfaces & Mongo schemas for core models (User, Booking, Cabin, AccessToken).
+ - Option B: I can scaffold the backend `services/llmService.ts` and an example API route that uses `generateText()`.
+ - Option C: I can create the Raspberry Pi `device_service.py` skeleton and systemd unit file.
+
+ Tell me which next step you want and I will implement it (e.g., scaffold backend LLM integration, add feature flag wiring, or create the Pi service starter).
+
+ -- End of document
